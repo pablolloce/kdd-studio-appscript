@@ -637,7 +637,7 @@ function flatReadRolesIndex_() {
   // ningún sitio cuál de las dos lleva los títulos. Si la de títulos es la
   // primera, la segunda es la separadora y se cae sola por el regex de email.
   for (var i = filaCabecera + 1; i < values.length; i++) {
-    var email = String(values[i][1] || '').toLowerCase().trim();
+    var email = cfgNormEmail_(values[i][1]);
     if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { continue; }
     var isAdmin = /^(x|si|sí|yes|true|1)$/i.test(String(values[i][3] || '').trim());
     var champion = flatSplitCaja_(values[i][4]);

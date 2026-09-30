@@ -358,6 +358,21 @@ function handleAuth_(params) {
 
   const roleInfo = lookupRole_(email);
 
+  // "No te he podido preguntar" NO es "no estás en el Excel". Con `warning`, el
+  // relay o la lectura de Roles fallaron y `found:false` es el fallback, no una
+  // respuesta: pintarlo como "no registrado" mandaba al admin a buscar una fila
+  // que sí existe. Sin callback `rejected` a propósito — el plugin lo trataría
+  // como denegación definitiva; aquí basta con reintentar el login.
+  if (!roleInfo.found && roleInfo.warning) {
+    Logger.log('handleAuth_: no se pudo resolver el rol de ' + email + ' — ' + roleInfo.warning);
+    return errorPage_(
+      'No se ha podido comprobar tu acceso',
+      'El servicio de autorización no ha respondido a tiempo para <strong>' + escapeHtml_(email) + '</strong>. ' +
+      'No significa que no tengas acceso: vuelve a iniciar sesión en unos segundos. ' +
+      'Si persiste, avisa a un administrador con este detalle: <em>' + escapeHtml_(String(roleInfo.warning).slice(0, 200)) + '</em>'
+    );
+  }
+
   if (!roleInfo.found) {
     var rejectPayload = JSON.stringify({ rejected: true, email: email, state: state });
     var rejectB64 = Utilities.base64Encode(rejectPayload, Utilities.Charset.UTF_8);
@@ -1571,7 +1586,7 @@ function accessGrantAccess_(payload) {
   // Roles). Lo dice ConfigData, que es el único que sabe su ID.
   OAUTH_PROTECTED_FILE_IDS_ = res.protectedFileIds || [];
 
-  var email = String((payload && payload.email) || '').toLowerCase().trim();
+  var email = cfgNormEmail_(payload && payload.email);
   var boxKey = res.boxKey || normBoxName_((payload && payload.boxName) || '');
   // El S-ID que devuelve ConfigData manda sobre el del payload: puede haber
   // MATERIALIZADO la caja en el árbol (#365), y entonces el payload no lo traía.
@@ -1659,7 +1674,7 @@ function accessRevokeAccess_(payload) {
     return jsonResponse_(outQ);
   }
 
-  var email = String((payload && payload.email) || '').toLowerCase().trim();
+  var email = cfgNormEmail_(payload && payload.email);
   var boxKey = res.boxKey || normBoxName_((payload && payload.boxName) || '');
   // Igual que en el alta: el S-ID resuelto por ConfigData manda (#365).
   var boxSid = String(res.sid || (payload && payload.sid) || '').trim();

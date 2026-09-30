@@ -475,6 +475,23 @@ function cfgNormRole_(s) {
   return folded ? folded : 'kb-contributor';
 }
 
+/** Email canónico para comparar la col B con la identidad que da Google.
+ *  Con `toLowerCase().trim()` a secas, un email pegado desde Outlook/Teams con
+ *  un carácter invisible (U+200B, U+FEFF, U+00A0 en medio…) o como
+ *  `Nombre <email>` / `mailto:email` no casaba NUNCA: la fila existe, el login
+ *  dice "no registrado". `trim()` no quita U+200B y el `\S` de la validación de
+ *  grant tampoco lo caza, así que ese email se escribía tal cual en el Sheet.
+ *  Ninguno de estos caracteres puede formar parte de un email real, así que
+ *  quitarlos no hace casar dos emails distintos. */
+function cfgNormEmail_(s) {
+  var str = String(s == null ? '' : s);
+  var m = /<([^<>]*@[^<>]*)>/.exec(str);
+  if (m) { str = m[1]; }
+  str = str.replace(/[\s\u00AD\u180E\u200B-\u200F\u2028-\u202F\u2060-\u2064\uFEFF]/g, '');
+  str = str.replace(/^mailto:/i, '');
+  return str.toLowerCase();
+}
+
 function cfgRoleRank_(role) {
   var r = cfgNormRole_(role);
   if (r === 'admin') { return 4; }
@@ -546,13 +563,13 @@ function cfgLookupRole_(email, opts) {
       return Object.assign({}, fallback, { warning: 'Sheet "' + cfg.sheetName + '" not found in spreadsheet' });
     }
     var values = hoja.values;
-    var needle = String(email || '').toLowerCase().trim();
+    var needle = cfgNormEmail_(email);
     // UN lector para toda la OPERACIÓN, no para esta invocación: el llamante
     // pasa el suyo si ya lo tiene (grant/revoke lo crean una vez y lo bajan por
     // los dos chequeos de potestad y la resolución de la caja).
     var arbol = (opts && opts.arbol) || cfgArbolLector_();
     for (var i = 2; i < values.length; i++) {
-      var rowEmail = String(values[i][1] || '').toLowerCase().trim();
+      var rowEmail = cfgNormEmail_(values[i][1]);
       if (!rowEmail || rowEmail !== needle) { continue; }
       var userType = String(values[i][2] || '').trim();
       var isAdmin = cfgIsAdminCell_(values[i][3]);
@@ -603,8 +620,9 @@ function cfgLookupRole_(email, opts) {
 // mano y un email puede acabar duplicado; list/grant/revoke deben verlas TODAS.
 function cfgRowsForEmail_(values, email) {
   var rows = [];
+  var needle = cfgNormEmail_(email);
   for (var i = 2; i < values.length; i++) {
-    if (String(values[i][1] || '').toLowerCase().trim() === email) { rows.push(i); }
+    if (cfgNormEmail_(values[i][1]) === needle) { rows.push(i); }
   }
   return rows;
 }
@@ -2207,7 +2225,7 @@ function cfgActionBoxAcl_(caller, payload) {
     var viewers = [];
     var seen = {};
     for (var i = 2; i < values.length; i++) {
-      var email = String(values[i][1] || '').toLowerCase().trim();
+      var email = cfgNormEmail_(values[i][1]);
       if (!email || seen[email]) { continue; }
       seen[email] = true;
       if (cfgIsAdminCell_(values[i][3])
@@ -2250,7 +2268,7 @@ function cfgBoxCensusFromValues_(values, boxKey, sid) {
   var byEmail = {};
   var typeByEmail = {};
   for (var i = 2; i < values.length; i++) {
-    var email = String(values[i][1] || '').toLowerCase().trim();
+    var email = cfgNormEmail_(values[i][1]);
     if (!email) { continue; }
     var userType = String(values[i][2] || '').trim();
     if (userType && typeByEmail[email] === undefined) { typeByEmail[email] = userType; }
@@ -2318,7 +2336,7 @@ function cfgBoxCensusFromValues_(values, boxKey, sid) {
 function cfgManagersFromValues_(values) {
   var out = {};
   for (var i = 2; i < values.length; i++) {
-    var email = String(values[i][1] || '').toLowerCase().trim();
+    var email = cfgNormEmail_(values[i][1]);
     if (!email || Object.prototype.hasOwnProperty.call(out, email)) { continue; }
     // Las cajas del gestor van por CLAVE DE CENSO (#365 fase E), el mismo
     // espacio que publica el índice y que pide el lector. Con la clave por
@@ -2565,7 +2583,7 @@ function cfgAclEnqueue_(item) {
 // devuelve lo que OAuthToken necesita para aplicarla él mismo.
 function cfgActionGrant_(caller, payload) {
   var boxName = String((payload && payload.boxName) || '').trim();
-  var email = String((payload && payload.email) || '').toLowerCase().trim();
+  var email = cfgNormEmail_(payload && payload.email);
   var requestedRole = String((payload && payload.role) || '').trim();
   if (!requestedRole && payload && payload.level) {
     // Compat: "read" significaba SOLO lectura — mapearlo a kb-contributor daba
@@ -2826,7 +2844,7 @@ function cfgActionGrant_(caller, payload) {
 // el token del que revoca si el buzón no está configurado.
 function cfgActionRevoke_(caller, payload) {
   var boxName = String((payload && payload.boxName) || '').trim();
-  var email = String((payload && payload.email) || '').toLowerCase().trim();
+  var email = cfgNormEmail_(payload && payload.email);
   if (!boxName) { return { ok: false, error: 'Falta boxName' }; }
   if (!/^\S+@\S+\.\S+$/.test(email)) { return { ok: false, error: 'Email no válido: "' + email + '"' }; }
 
@@ -3882,6 +3900,58 @@ function cfgAuditarSidsHuerfanos() {
     ? '✅ ' + total + ' S-ID concedidos, todos existen en el árbol.'
     : '🔴 ' + huerfanos + ' de ' + total + ' S-ID concedidos NO existen en el árbol (ver arriba). ' +
       'Cada uno es un acceso a ninguna parte: o falta la caja en el árbol, o la celda quedó con un S-ID viejo.');
+}
+
+/**
+ * Run → cfgDiagnosticarEmails(). Para el "Acceso no autorizado" de alguien que
+ * SÍ está en el Sheet: lista las filas de la col B que no casarían con la
+ * identidad de Google sin normalizar (caracteres invisibles, `Nombre <email>`,
+ * `mailto:`), las que no son un email y los emails repetidos (#305: el login
+ * solo lee la PRIMERA fila). Solo informa, no toca ninguna celda.
+ *
+ * Lo que esto NO puede ver: un ALIAS. Google identifica por la dirección
+ * PRINCIPAL de la cuenta; si la fila tiene un alias, compárala con el email que
+ * sale en la pantalla de "Acceso no autorizado".
+ */
+function cfgDiagnosticarEmails() {
+  cfgAssertPrivileged_();
+  var sheet = cfgOpenRolesSheet_();
+  if (!sheet) { Logger.log('❌ No hay hoja de roles configurada (SHEET_ID / SHEET_NAME).'); return; }
+  var values = cfgLeerHoja_(sheet, 'roles');
+  var filasPorEmail = {};
+  var avisos = 0;
+  for (var i = 2; i < values.length; i++) {
+    var crudo = String(values[i][1] == null ? '' : values[i][1]);
+    if (!crudo.trim()) { continue; }
+    var email = cfgNormEmail_(crudo);
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      avisos++;
+      Logger.log('🔴 fila ' + (i + 1) + ' · col B no es un email: ' + cfgVisible_(crudo));
+      continue;
+    }
+    if (crudo.toLowerCase().trim() !== email) {
+      avisos++;
+      Logger.log('⚠️ fila ' + (i + 1) + ' · ' + cfgVisible_(crudo) + ' → se lee como "' + email +
+        '" (caracteres invisibles o formato "Nombre <email>"). Conviene reescribir la celda a mano.');
+    }
+    (filasPorEmail[email] = filasPorEmail[email] || []).push(i + 1);
+  }
+  for (var e in filasPorEmail) {
+    if (filasPorEmail[e].length > 1) {
+      avisos++;
+      Logger.log('⚠️ ' + e + ' repetido en las filas ' + filasPorEmail[e].join(', ') +
+        ' — el login solo lee la primera: une las cajas en una sola fila.');
+    }
+  }
+  Logger.log(avisos === 0 ? '✅ Col B limpia: ningún email con caracteres raros ni repetido.' : '🔴 ' + avisos + ' aviso(s), ver arriba.');
+}
+
+/** El texto de la celda con lo no-ASCII escrito como \\uXXXX: en el log, un
+ *  U+200B es invisible y la línea se leería igual que una celda sana. */
+function cfgVisible_(s) {
+  return '"' + String(s).replace(/[^\x20-\x7e]/g, function (c) {
+    return '\\u' + ('000' + c.charCodeAt(0).toString(16).toUpperCase()).slice(-4);
+  }) + '"';
 }
 
 /** Letra de columna del Sheet a partir del índice 0-based (col E = 4). */
