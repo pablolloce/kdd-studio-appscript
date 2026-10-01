@@ -101,6 +101,20 @@ function lookupRole_(email) {
 // ── HTTP entry point ─────────────────────────────────────────────────────────
 
 function doGet(e) {
+  // PERMISOS INCOMPLETOS, antes que nada. Google pide los permisos con una
+  // casilla por scope y recuerda la elección: quien no marcó todas llegaba al
+  // login, el relay a ConfigData fallaba sin `script.external_request` o sin
+  // Drive, y veía "Acceso no autorizado" para siempre — con su fila bien en el
+  // Excel. Va ANTES de la barrera 1 porque sin `userinfo.email` esa barrera
+  // lanza y el usuario vería un error de Google sin explicación. No filtra
+  // nada: en la privilegiada corre como el propietario, que lo tiene todo
+  // concedido, y sigue a la barrera como siempre.
+  var paramsPermisos = (e && e.parameter) ? e.parameter : {};
+  if ((paramsPermisos.action || 'auth') === 'auth') {
+    var faltan = permisosFaltantes_();
+    if (faltan) { return permisosPage_(faltan); }
+  }
+
   // BARRERA 1. Va ANTES de mirar la acción: en la implementación PRIVILEGIADA un
   // GET corre como el PROPIETARIO, así que sin esto un `?action=auth` abierto a
   // mano por cualquiera del dominio se llevaría el token del dueño (bug #90).
@@ -674,6 +688,91 @@ function redirectPage_(target, email, roleInfo) {
 }
 
 // ── Error page ───────────────────────────────────────────────────────────────
+
+// Texto de cada scope del manifest tal como lo enseña la pantalla de Google,
+// para que el usuario sepa QUÉ casilla le falta. Solo es la etiqueta: si se
+// añade un scope al manifest y no aquí, la comprobación lo sigue exigiendo
+// (la decide `getAuthorizationStatus`) y la página cae al texto genérico.
+var PERMISOS_LOGIN_ = {
+  'https://www.googleapis.com/auth/drive': 'Ver, editar, crear y eliminar todos tus archivos de Google Drive',
+  'https://www.googleapis.com/auth/spreadsheets': 'Ver, editar, crear y eliminar tus hojas de cálculo de Google',
+  'https://www.googleapis.com/auth/userinfo.email': 'Ver la dirección de correo electrónico de tu cuenta de Google',
+  'https://www.googleapis.com/auth/script.external_request': 'Conectarse a un servicio externo',
+  'https://www.googleapis.com/auth/script.scriptapp': 'Permitir que esta aplicación se ejecute cuando no estés presente',
+};
+
+/**
+ * `null` si el usuario tiene concedidos todos los scopes del manifest (o si no
+ * se puede saber); si no, `{ url, faltan }` — la URL de autorización de Google
+ * y las etiquetas de lo que falta (vacía si Google no dice qué hay concedido).
+ *
+ * Ante la duda devuelve `null`: esto solo mejora el mensaje, y bloquear un
+ * login sano porque la API de autorización lance sería peor que el problema.
+ */
+function permisosFaltantes_() {
+  try {
+    var info = ScriptApp.getAuthorizationInfo(ScriptApp.AuthMode.FULL);
+    if (info.getAuthorizationStatus() !== ScriptApp.AuthorizationStatus.REQUIRED) { return null; }
+    var faltan = [];
+    try {
+      var concedidos = {};
+      (info.getAuthorizedScopes() || []).forEach(function (s) { concedidos[s] = true; });
+      Object.keys(PERMISOS_LOGIN_).forEach(function (s) {
+        if (!concedidos[s]) { faltan.push(PERMISOS_LOGIN_[s]); }
+      });
+    } catch (eScopes) { faltan = []; }
+    var url = '';
+    try { url = info.getAuthorizationUrl() || ''; } catch (eUrl) { url = ''; }
+    var quien = '';
+    try { quien = Session.getActiveUser().getEmail() || ''; } catch (eSes) { quien = ''; }
+    Logger.log('permisosFaltantes_: ' + (quien || '(email no concedido)') + ' — faltan ' +
+      (faltan.length ? faltan.join(' · ') : '(Google no dice cuáles)'));
+    return { url: url, faltan: faltan };
+  } catch (err) {
+    Logger.log('permisosFaltantes_: no se pudo comprobar — ' + (err && err.message ? err.message : String(err)));
+    return null;
+  }
+}
+
+function permisosPage_(info) {
+  var lista = info.faltan.length
+    ? '<ul class="detail" style="text-align:left;display:inline-block;margin:0.5rem 0;">' +
+        info.faltan.map(function (f) { return '<li>' + escapeHtml_(f) + '</li>'; }).join('') + '</ul>'
+    : '';
+  // target=_blank: esta página va dentro del iframe de HtmlService y la
+  // pantalla de Google no se deja cargar en un iframe.
+  var boton = info.url
+    ? '<p style="margin-top:1.5rem;"><a class="link" target="_blank" rel="noopener" href="' + escapeHtml_(info.url) + '">' +
+        '<strong>Conceder los permisos que faltan</strong></a></p>'
+    : '<p class="detail">Entra en <strong>myaccount.google.com/connections</strong>, quita el acceso de KDD Studio ' +
+        'y vuelve a iniciar sesión desde el plugin.</p>';
+  var html =
+    '<!DOCTYPE html>' +
+    '<html lang="es"><head><meta charset="utf-8"/>' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1"/>' +
+    '<title>KDD Studio — Faltan permisos</title>' +
+    '<style>' + corporateStyles_() +
+    ' .status-icon { color: var(--nfq-pink); }' +
+    ' .detail { font-size: 0.9rem; color: rgba(255,255,255,0.55); line-height: 1.7; }' +
+    ' .detail strong { color: var(--nfq-white); }' +
+    '</style>' +
+    '</head><body>' +
+    '<div class="card">' +
+      nfqLogoSvg_() +
+      '<div class="divider"></div>' +
+      '<div class="status-icon">⚠</div>' +
+      '<h1>Faltan permisos de Google</h1>' +
+      '<p class="detail">Cuando autorizaste KDD Studio no se concedieron todos los permisos' +
+        (lista ? '. Faltan:' : ', y sin ellos no se puede comprobar tu acceso.') + '</p>' +
+      lista +
+      boton +
+      '<p class="detail">En la pantalla de Google marca <strong>Seleccionar todo</strong> y después ' +
+        'vuelve a iniciar sesión desde el plugin.</p>' +
+      '<p class="hint">Knowledge-Driven Development Studio</p>' +
+    '</div>' +
+    '</body></html>';
+  return HtmlService.createHtmlOutput(html).setTitle('KDD Studio — Faltan permisos');
+}
 
 function errorPage_(title, detail, callbackUrl) {
   var callbackScript = '';
